@@ -22,7 +22,7 @@ def root():
 
 def preview_order(symbol, action, quantity):
 
-    url = f"{WEBULL_API_URL}/trade/order/preview"
+    url = f"{WEBULL_API_URL}/openapi/trade/order/preview"
 
     payload = {
         "symbol": symbol,
