@@ -5,7 +5,8 @@ import uuid
 import hmac
 import hashlib
 import base64
-import urllib.parse
+import json
+from urllib.parse import quote, urlparse
 import requests
 
 app = FastAPI()
@@ -16,6 +17,7 @@ STOP_LOSS_USD = os.getenv("STOP_LOSS_USD", "330")
 WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
 WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
 WEBULL_API_URL = os.getenv("WEBULL_API_URL", "https://api.webull.com")
+WEBULL_ACCESS_TOKEN = os.getenv("WEBULL_ACCESS_TOKEN", "")
 
 
 @app.get("/")
@@ -24,6 +26,7 @@ def root():
         "status": "ok",
         "mode": MODE,
         "stop_loss_usd": STOP_LOSS_USD,
+        "has_webull_token": bool(WEBULL_ACCESS_TOKEN),
         "has_app_key": bool(WEBULL_APP_KEY),
         "has_app_secret": bool(WEBULL_APP_SECRET),
     }
@@ -33,80 +36,83 @@ def utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def make_nonce() -> str:
-    return uuid.uuid4().hex
-
-
-def upper_md5(text: str) -> str:
+def md5_upper(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest().upper()
 
 
-def build_signature(
-    uri: str,
-    headers_for_sig: dict,
-    app_secret: str,
-    body: str = ""
-) -> tuple[str, str]:
-    # Sort headers by key and build k=v pairs
-    parts = [f"{k}={headers_for_sig[k]}" for k in sorted(headers_for_sig.keys())]
-    s1 = "&".join(parts)
+def generate_signature(uri: str, query_params: dict, body_params: dict, headers: dict, app_secret: str):
+    params_dict = (query_params or {}).copy()
+    params_dict.update({
+        "x-app-key": headers["x-app-key"],
+        "x-signature-algorithm": headers["x-signature-algorithm"],
+        "x-signature-version": headers["x-signature-version"],
+        "x-signature-nonce": headers["x-signature-nonce"],
+        "x-timestamp": headers["x-timestamp"],
+        "host": headers["host"],
+    })
 
-    if body:
-        s2 = upper_md5(body)
-        sign_string = f"{uri}&{s1}&{s2}"
-    else:
-        sign_string = f"{uri}&{s1}"
+    sorted_params = sorted(params_dict.items())
+    param_string = "&".join([f"{k}={v}" for k, v in sorted_params])
 
-    encoded = urllib.parse.quote(sign_string, safe="-_.~").replace("%2f", "%2F")
-    key = f"{app_secret}&".encode("utf-8")
-    digest = hmac.new(key, encoded.encode("utf-8"), hashlib.sha1).digest()
-    signature = base64.b64encode(digest).decode("utf-8")
-    return signature, sign_string
+    body_json = ""
+    body_md5 = ""
+    if body_params:
+        body_json = json.dumps(body_params, ensure_ascii=False, separators=(",", ":"))
+        body_md5 = md5_upper(body_json)
+
+    sign_string = f"{uri}&{param_string}{'&' + body_md5 if body_md5 else ''}"
+    encoded_sign_string = quote(sign_string, safe="")
+
+    secret = f"{app_secret}&"
+    signature = base64.b64encode(
+        hmac.new(secret.encode(), encoded_sign_string.encode(), hashlib.sha1).digest()
+    ).decode("utf-8")
+
+    return signature, sign_string, body_json
 
 
-def build_headers(uri: str, body: str = "") -> dict:
-    timestamp = utc_timestamp()
-    nonce = make_nonce()
-    host = urllib.parse.urlparse(WEBULL_API_URL).netloc
-
-    sig_headers = {
-        "host": host,
-        "x-app-key": WEBULL_APP_KEY,
-        "x-signature-algorithm": "HMAC-SHA1",
-        "x-signature-nonce": nonce,
-        "x-signature-version": "1.0",
-        "x-timestamp": timestamp,
-    }
-
-    signature, sign_string = build_signature(
-        uri=uri,
-        headers_for_sig=sig_headers,
-        app_secret=WEBULL_APP_SECRET,
-        body=body,
-    )
+def build_headers(uri: str, query_params: dict = None, body_params: dict = None, include_token: bool = False):
+    host = urlparse(WEBULL_API_URL).netloc
 
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "host": host,
         "x-app-key": WEBULL_APP_KEY,
-        "x-app-secret": WEBULL_APP_SECRET,
-        "x-timestamp": timestamp,
-        "x-signature-version": "1.0",
         "x-signature-algorithm": "HMAC-SHA1",
-        "x-signature-nonce": nonce,
+        "x-signature-version": "1.0",
+        "x-signature-nonce": uuid.uuid4().hex,
+        "x-timestamp": utc_timestamp(),
         "x-version": "v2",
-        "x-signature": signature,
     }
 
-    return headers, sign_string
+    signature, sign_string, body_json = generate_signature(
+        uri=uri,
+        query_params=query_params or {},
+        body_params=body_params or {},
+        headers=headers,
+        app_secret=WEBULL_APP_SECRET,
+    )
+
+    headers["x-signature"] = signature
+
+    if include_token and WEBULL_ACCESS_TOKEN:
+        headers["x-access-token"] = WEBULL_ACCESS_TOKEN
+
+    return headers, sign_string, body_json
 
 
 @app.get("/webull/create-token")
 def create_token():
     uri = "/openapi/auth/token/create"
     url = f"{WEBULL_API_URL}{uri}"
-    headers, sign_string = build_headers(uri=uri, body="")
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params={},
+        include_token=False,
+    )
 
     try:
         r = requests.post(url, headers=headers, timeout=30)
@@ -124,6 +130,31 @@ def create_token():
                 "x-signature-nonce": headers.get("x-signature-nonce"),
                 "x-version": headers.get("x-version"),
             },
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
+
+
+@app.get("/webull/check-token")
+def check_token():
+    uri = "/openapi/auth/token/check"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params={},
+        include_token=True,
+    )
+
+    try:
+        r = requests.post(url, headers=headers, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "has_access_token": bool(WEBULL_ACCESS_TOKEN),
         }
     except Exception as e:
         return {"url": url, "error": str(e)}
