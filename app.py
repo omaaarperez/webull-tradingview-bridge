@@ -1,11 +1,16 @@
 from fastapi import FastAPI, Request
 import os
+import requests
 
 app = FastAPI()
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 MODE = os.getenv("MODE", "preview_only")
 STOP_LOSS_USD = os.getenv("STOP_LOSS_USD", "330")
+
+WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
+WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
+WEBULL_API_URL = os.getenv("WEBULL_API_URL")
 
 @app.get("/")
 def root():
@@ -15,17 +20,44 @@ def root():
         "stop_loss_usd": STOP_LOSS_USD
     }
 
+def preview_order(symbol, action, quantity):
+
+    url = f"{WEBULL_API_URL}/trade/order/preview"
+
+    payload = {
+        "symbol": symbol,
+        "side": action.upper(),
+        "orderType": "MKT",
+        "quantity": quantity
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "app-key": WEBULL_APP_KEY,
+        "app-secret": WEBULL_APP_SECRET
+    }
+
+    r = requests.post(url, json=payload, headers=headers)
+
+    return r.text
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
+
     data = await request.json()
 
     if data.get("secret") != WEBHOOK_SECRET:
         return {"status": "unauthorized"}
 
-    print("Received alert:", data)
+    ticker = data["ticker"]
+    action = data["action"]
+    quantity = int(data["quantity"])
+
+    preview_result = preview_order(ticker, action, quantity)
 
     return {
         "status": "received",
         "mode": MODE,
-        "payload": data
+        "preview_result": preview_result
     }
