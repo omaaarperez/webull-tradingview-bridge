@@ -121,15 +121,6 @@ def create_token():
             "status_code": r.status_code,
             "response": r.text,
             "debug_sign_string": sign_string,
-            "debug_headers_used": {
-                "host": headers.get("host"),
-                "x-app-key": headers.get("x-app-key"),
-                "x-timestamp": headers.get("x-timestamp"),
-                "x-signature-version": headers.get("x-signature-version"),
-                "x-signature-algorithm": headers.get("x-signature-algorithm"),
-                "x-signature-nonce": headers.get("x-signature-nonce"),
-                "x-version": headers.get("x-version"),
-            },
         }
     except Exception as e:
         return {"url": url, "error": str(e)}
@@ -140,20 +131,25 @@ def check_token():
     uri = "/openapi/auth/token/check"
     url = f"{WEBULL_API_URL}{uri}"
 
+    body_params = {
+        "token": WEBULL_ACCESS_TOKEN
+    }
+
     headers, sign_string, body_json = build_headers(
         uri=uri,
         query_params={},
-        body_params={},
+        body_params=body_params,
         include_token=True,
     )
 
     try:
-        r = requests.post(url, headers=headers, timeout=30)
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
         return {
             "url": url,
             "status_code": r.status_code,
             "response": r.text,
             "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
             "has_access_token": bool(WEBULL_ACCESS_TOKEN),
         }
     except Exception as e:
