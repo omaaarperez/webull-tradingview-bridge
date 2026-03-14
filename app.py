@@ -35,6 +35,8 @@ def root():
         "stop_loss_usd": STOP_LOSS_USD,
         "has_webull_token": bool(WEBULL_ACCESS_TOKEN),
         "has_account_id": bool(WEBULL_ACCOUNT_ID),
+        "has_app_key": bool(WEBULL_APP_KEY),
+        "has_app_secret": bool(WEBULL_APP_SECRET),
     }
 
 
@@ -108,6 +110,30 @@ def build_headers(uri: str, query_params: dict = None, body_params: dict = None,
     return headers, sign_string, body_json
 
 
+@app.get("/webull/create-token")
+def create_token():
+    uri = "/openapi/auth/token/create"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params={},
+        include_token=False,
+    )
+
+    try:
+        r = requests.post(url, headers=headers, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
+
+
 @app.get("/webull/check-token")
 def check_token():
     uri = "/openapi/auth/token/check"
@@ -122,15 +148,18 @@ def check_token():
         include_token=True,
     )
 
-    r = requests.post(url, headers=headers, data=body_json, timeout=30)
-    return {
-        "url": url,
-        "status_code": r.status_code,
-        "response": r.text,
-        "debug_sign_string": sign_string,
-        "debug_body_json": body_json,
-        "has_access_token": bool(WEBULL_ACCESS_TOKEN),
-    }
+    try:
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
+            "has_access_token": bool(WEBULL_ACCESS_TOKEN),
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
 
 
 @app.get("/webull/account-list")
@@ -138,32 +167,37 @@ def account_list():
     uri = "/openapi/account/list"
     url = f"{WEBULL_API_URL}{uri}"
 
-    query_params = {}
     headers, sign_string, body_json = build_headers(
         uri=uri,
-        query_params=query_params,
+        query_params={},
         body_params={},
         include_token=True,
     )
 
-    r = requests.get(url, headers=headers, timeout=30)
-    return {
-        "url": url,
-        "status_code": r.status_code,
-        "response": r.text,
-        "debug_sign_string": sign_string,
-    }
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
 
 
 def preview_order(symbol: str, side: str, quantity: int):
     uri = "/openapi/trade/order/preview"
-    query_params = {"account_id": WEBULL_ACCOUNT_ID}
-    query_string = f"?account_id={WEBULL_ACCOUNT_ID}"
-    url = f"{WEBULL_API_URL}{uri}{query_string}"
+    url = f"{WEBULL_API_URL}{uri}"
 
     mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
 
+    # NOTE:
+    # This is the current raw HTTP preview payload under test.
+    # Auth/token/account are working. If Webull rejects the payload,
+    # the next step is SDK-based order_v3 integration.
     body_params = {
+        "account_id": WEBULL_ACCOUNT_ID,
         "new_orders": [
             {
                 "combo_type": "NORMAL",
@@ -172,7 +206,7 @@ def preview_order(symbol: str, side: str, quantity: int):
                 "instrument_type": "FUTURES",
                 "market": "US",
                 "order_type": "MARKET",
-                "quantity": "1",
+                "quantity": str(quantity),
                 "side": side.upper(),
                 "time_in_force": "DAY",
                 "entrust_type": "QTY"
@@ -182,20 +216,26 @@ def preview_order(symbol: str, side: str, quantity: int):
 
     headers, sign_string, body_json = build_headers(
         uri=uri,
-        query_params=query_params,
+        query_params={},
         body_params=body_params,
         include_token=True,
     )
 
-    r = requests.post(url, headers=headers, data=body_json, timeout=30)
-
-    return {
-        "url": url,
-        "status_code": r.status_code,
-        "response": r.text,
-        "debug_sign_string": sign_string,
-        "debug_body_json": body_json,
-    }
+    try:
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e),
+            "debug_body_json": body_json,
+        }
 
 
 @app.get("/webull/preview-mnq-buy")
