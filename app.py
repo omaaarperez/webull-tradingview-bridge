@@ -108,48 +108,6 @@ def build_headers(uri: str, query_params: dict = None, body_params: dict = None,
     return headers, sign_string, body_json
 
 
-def preview_order(symbol: str, side: str, quantity: int):
-    uri = "/openapi/trade/order/preview"
-    url = f"{WEBULL_API_URL}{uri}"
-
-    mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
-
-    body_params = {
-        "account_id": WEBULL_ACCOUNT_ID,
-        "orders": [
-            {
-                "combo_type": "NORMAL",
-                "client_order_id": uuid.uuid4().hex,
-                "symbol": mapped_symbol,
-                "instrument_type": "FUTURES",
-                "market": "US",
-                "order_type": "MARKET",
-                "quantity": str(quantity),
-                "side": side.upper(),
-                "time_in_force": "DAY",
-                "entrust_type": "QTY"
-            }
-        ]
-    }
-
-    headers, sign_string, body_json = build_headers(
-        uri=uri,
-        query_params={},
-        body_params=body_params,
-        include_token=True,
-    )
-
-    r = requests.post(url, headers=headers, data=body_json, timeout=30)
-
-    return {
-        "url": url,
-        "status_code": r.status_code,
-        "response": r.text,
-        "debug_sign_string": sign_string,
-        "debug_body_json": body_json,
-    }
-
-
 @app.get("/webull/check-token")
 def check_token():
     uri = "/openapi/auth/token/check"
@@ -172,6 +130,71 @@ def check_token():
         "debug_sign_string": sign_string,
         "debug_body_json": body_json,
         "has_access_token": bool(WEBULL_ACCESS_TOKEN),
+    }
+
+
+@app.get("/webull/account-list")
+def account_list():
+    uri = "/openapi/account/list"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    query_params = {}
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params=query_params,
+        body_params={},
+        include_token=True,
+    )
+
+    r = requests.get(url, headers=headers, timeout=30)
+    return {
+        "url": url,
+        "status_code": r.status_code,
+        "response": r.text,
+        "debug_sign_string": sign_string,
+    }
+
+
+def preview_order(symbol: str, side: str, quantity: int):
+    uri = "/openapi/trade/order/preview"
+    query_params = {"account_id": WEBULL_ACCOUNT_ID}
+    query_string = f"?account_id={WEBULL_ACCOUNT_ID}"
+    url = f"{WEBULL_API_URL}{uri}{query_string}"
+
+    mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
+
+    body_params = {
+        "new_orders": [
+            {
+                "combo_type": "NORMAL",
+                "client_order_id": uuid.uuid4().hex,
+                "symbol": mapped_symbol,
+                "instrument_type": "FUTURES",
+                "market": "US",
+                "order_type": "MARKET",
+                "quantity": "1",
+                "side": side.upper(),
+                "time_in_force": "DAY",
+                "entrust_type": "QTY"
+            }
+        ]
+    }
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params=query_params,
+        body_params=body_params,
+        include_token=True,
+    )
+
+    r = requests.post(url, headers=headers, data=body_json, timeout=30)
+
+    return {
+        "url": url,
+        "status_code": r.status_code,
+        "response": r.text,
+        "debug_sign_string": sign_string,
+        "debug_body_json": body_json,
     }
 
 
