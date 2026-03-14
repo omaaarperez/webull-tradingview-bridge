@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 import os
 import time
 import uuid
@@ -13,11 +13,18 @@ app = FastAPI()
 
 MODE = os.getenv("MODE", "preview_only")
 STOP_LOSS_USD = os.getenv("STOP_LOSS_USD", "330")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
 WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
 WEBULL_API_URL = os.getenv("WEBULL_API_URL", "https://api.webull.com")
 WEBULL_ACCESS_TOKEN = os.getenv("WEBULL_ACCESS_TOKEN", "")
+WEBULL_ACCOUNT_ID = os.getenv("WEBULL_ACCOUNT_ID", "")
+
+SYMBOL_MAP = {
+    "MNQH2026": "MNQH2026",
+    "MGCJ2026": "MGCJ2026",
+}
 
 
 @app.get("/")
@@ -27,8 +34,7 @@ def root():
         "mode": MODE,
         "stop_loss_usd": STOP_LOSS_USD,
         "has_webull_token": bool(WEBULL_ACCESS_TOKEN),
-        "has_app_key": bool(WEBULL_APP_KEY),
-        "has_app_secret": bool(WEBULL_APP_SECRET),
+        "has_account_id": bool(WEBULL_ACCOUNT_ID),
     }
 
 
@@ -102,6 +108,48 @@ def build_headers(uri: str, query_params: dict = None, body_params: dict = None,
     return headers, sign_string, body_json
 
 
+def preview_order(symbol: str, side: str, quantity: int):
+    uri = "/openapi/trade/order/preview"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
+
+    body_params = {
+        "account_id": WEBULL_ACCOUNT_ID,
+        "orders": [
+            {
+                "combo_type": "NORMAL",
+                "client_order_id": uuid.uuid4().hex,
+                "symbol": mapped_symbol,
+                "instrument_type": "FUTURES",
+                "market": "US",
+                "order_type": "MARKET",
+                "quantity": str(quantity),
+                "side": side.upper(),
+                "time_in_force": "DAY",
+                "entrust_type": "QTY"
+            }
+        ]
+    }
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params=body_params,
+        include_token=True,
+    )
+
+    r = requests.post(url, headers=headers, data=body_json, timeout=30)
+
+    return {
+        "url": url,
+        "status_code": r.status_code,
+        "response": r.text,
+        "debug_sign_string": sign_string,
+        "debug_body_json": body_json,
+    }
+
+
 @app.get("/webull/check-token")
 def check_token():
     uri = "/openapi/auth/token/check"
@@ -127,65 +175,41 @@ def check_token():
     }
 
 
-@app.get("/webull/account-list")
-def account_list():
-    uri = "/openapi/account/list"
-    url = f"{WEBULL_API_URL}{uri}"
-
-    headers, sign_string, body_json = build_headers(
-        uri=uri,
-        query_params={},
-        body_params={},
-        include_token=True,
-    )
-
-    r = requests.get(url, headers=headers, timeout=30)
-    return {
-        "url": url,
-        "status_code": r.status_code,
-        "response": r.text,
-        "debug_sign_string": sign_string,
-    }
-
-
 @app.get("/webull/preview-mnq-buy")
 def preview_mnq_buy():
-    uri = "/openapi/trade/order/preview"
-    url = f"{WEBULL_API_URL}{uri}"
+    return preview_order("MNQH2026", "BUY", 1)
 
-    # replace WEBULL_ACCOUNT_ID after you get it from /webull/account-list
-    account_id = os.getenv("WEBULL_ACCOUNT_ID", "")
 
-    body_params = {
-        "account_id": account_id,
-        "orders": [
-            {
-                "combo_type": "NORMAL",
-                "client_order_id": uuid.uuid4().hex,
-                "symbol": "MNQH2026",
-                "instrument_type": "FUTURES",
-                "market": "US",
-                "order_type": "MARKET",
-                "quantity": "1",
-                "side": "BUY",
-                "time_in_force": "DAY",
-                "entrust_type": "QTY"
-            }
-        ]
-    }
+@app.get("/webull/preview-mgc-buy")
+def preview_mgc_buy():
+    return preview_order("MGCJ2026", "BUY", 1)
 
-    headers, sign_string, body_json = build_headers(
-        uri=uri,
-        query_params={},
-        body_params=body_params,
-        include_token=True,
-    )
 
-    r = requests.post(url, headers=headers, data=body_json, timeout=30)
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+
+    if data.get("secret") != WEBHOOK_SECRET:
+        return {"status": "unauthorized"}
+
+    ticker = data.get("ticker", "")
+    action = data.get("action", "").lower()
+    quantity = int(float(data.get("quantity", 1)))
+
+    if action == "buy":
+        side = "BUY"
+    elif action == "sell":
+        side = "SELL"
+    else:
+        return {"status": "error", "message": f"Unsupported action: {action}"}
+
+    preview_result = preview_order(ticker, side, quantity)
+
     return {
-        "url": url,
-        "status_code": r.status_code,
-        "response": r.text,
-        "debug_sign_string": sign_string,
-        "debug_body_json": body_json,
+        "status": "received",
+        "mode": MODE,
+        "ticker": ticker,
+        "action": action,
+        "quantity": quantity,
+        "preview_result": preview_result,
     }
