@@ -1,3 +1,6 @@
 fastapi
 uvicorn
 requests
+webull-python-sdk-core
+webull-python-sdk-trade
+webull-python-sdk-trade-events-core
