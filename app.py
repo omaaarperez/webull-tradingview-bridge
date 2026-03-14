@@ -102,37 +102,76 @@ def build_headers(uri: str, query_params: dict = None, body_params: dict = None,
     return headers, sign_string, body_json
 
 
-@app.get("/webull/create-token")
-def create_token():
-    uri = "/openapi/auth/token/create"
+@app.get("/webull/check-token")
+def check_token():
+    uri = "/openapi/auth/token/check"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    body_params = {"token": WEBULL_ACCESS_TOKEN}
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params=body_params,
+        include_token=True,
+    )
+
+    r = requests.post(url, headers=headers, data=body_json, timeout=30)
+    return {
+        "url": url,
+        "status_code": r.status_code,
+        "response": r.text,
+        "debug_sign_string": sign_string,
+        "debug_body_json": body_json,
+        "has_access_token": bool(WEBULL_ACCESS_TOKEN),
+    }
+
+
+@app.get("/webull/account-list")
+def account_list():
+    uri = "/openapi/account/list"
     url = f"{WEBULL_API_URL}{uri}"
 
     headers, sign_string, body_json = build_headers(
         uri=uri,
         query_params={},
         body_params={},
-        include_token=False,
+        include_token=True,
     )
 
-    try:
-        r = requests.post(url, headers=headers, timeout=30)
-        return {
-            "url": url,
-            "status_code": r.status_code,
-            "response": r.text,
-            "debug_sign_string": sign_string,
-        }
-    except Exception as e:
-        return {"url": url, "error": str(e)}
+    r = requests.get(url, headers=headers, timeout=30)
+    return {
+        "url": url,
+        "status_code": r.status_code,
+        "response": r.text,
+        "debug_sign_string": sign_string,
+    }
 
 
-@app.get("/webull/check-token")
-def check_token():
-    uri = "/openapi/auth/token/check"
+@app.get("/webull/preview-mnq-buy")
+def preview_mnq_buy():
+    uri = "/openapi/trade/order/preview"
     url = f"{WEBULL_API_URL}{uri}"
 
+    # replace WEBULL_ACCOUNT_ID after you get it from /webull/account-list
+    account_id = os.getenv("WEBULL_ACCOUNT_ID", "")
+
     body_params = {
-        "token": WEBULL_ACCESS_TOKEN
+        "account_id": account_id,
+        "orders": [
+            {
+                "combo_type": "NORMAL",
+                "client_order_id": uuid.uuid4().hex,
+                "symbol": "MNQH2026",
+                "instrument_type": "FUTURES",
+                "market": "US",
+                "order_type": "MARKET",
+                "quantity": "1",
+                "side": "BUY",
+                "time_in_force": "DAY",
+                "entrust_type": "QTY"
+            }
+        ]
     }
 
     headers, sign_string, body_json = build_headers(
@@ -142,15 +181,11 @@ def check_token():
         include_token=True,
     )
 
-    try:
-        r = requests.post(url, headers=headers, data=body_json, timeout=30)
-        return {
-            "url": url,
-            "status_code": r.status_code,
-            "response": r.text,
-            "debug_sign_string": sign_string,
-            "debug_body_json": body_json,
-            "has_access_token": bool(WEBULL_ACCESS_TOKEN),
-        }
-    except Exception as e:
-        return {"url": url, "error": str(e)}
+    r = requests.post(url, headers=headers, data=body_json, timeout=30)
+    return {
+        "url": url,
+        "status_code": r.status_code,
+        "response": r.text,
+        "debug_sign_string": sign_string,
+        "debug_body_json": body_json,
+    }
