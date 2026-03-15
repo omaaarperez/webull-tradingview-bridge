@@ -189,7 +189,7 @@ def account_list():
 
 
 def get_positions():
-    uri = "/openapi/account/position/list"
+    uri = "/openapi/assets/positions"
     url = f"{WEBULL_API_URL}{uri}"
 
     body_params = {
