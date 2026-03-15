@@ -192,33 +192,32 @@ def get_positions():
     uri = "/openapi/assets/positions"
     url = f"{WEBULL_API_URL}{uri}"
 
-    body_params = {
+    query_params = {
         "account_id": WEBULL_ACCOUNT_ID
     }
 
     headers, sign_string, body_json = build_headers(
         uri=uri,
-        query_params={},
-        body_params=body_params,
+        query_params=query_params,
+        body_params={},
         include_token=True,
     )
 
     try:
-        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+        r = requests.get(url, headers=headers, params=query_params, timeout=30)
 
         return {
-            "url": url,
+            "url": r.url,
             "status_code": r.status_code,
             "response": r.text,
             "debug_sign_string": sign_string,
-            "debug_body_json": body_json,
         }
     except Exception as e:
         return {
             "url": url,
             "error": str(e),
-            "debug_body_json": body_json,
         }
+
 
 
 @app.get("/webull/positions")
