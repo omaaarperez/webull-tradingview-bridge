@@ -325,6 +325,7 @@ def preview_mgc_buy():
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
+    print("WEBHOOK RECEIVED:", data)
 
     if data.get("secret") != WEBHOOK_SECRET:
         return {"status": "unauthorized"}
