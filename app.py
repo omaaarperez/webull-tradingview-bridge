@@ -188,16 +188,89 @@ def account_list():
         return {"url": url, "error": str(e)}
 
 
+def get_positions():
+    uri = "/openapi/account/position/list"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    body_params = {
+        "account_id": WEBULL_ACCOUNT_ID
+    }
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params=body_params,
+        include_token=True,
+    )
+
+    try:
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e),
+            "debug_body_json": body_json,
+        }
+
+
+@app.get("/webull/positions")
+def positions():
+    return get_positions()
+
+
+def get_position_side_for_symbol(symbol: str) -> str:
+    result = get_positions()
+
+    if result.get("status_code") != 200:
+        return "UNKNOWN"
+
+    try:
+        data = json.loads(result.get("response", "[]"))
+    except Exception:
+        return "UNKNOWN"
+
+    for p in data:
+        pos_symbol = str(p.get("symbol", "")).upper()
+        if pos_symbol != symbol.upper():
+            continue
+
+        qty_raw = p.get("position", p.get("quantity", p.get("qty", 0)))
+
+        try:
+            qty = float(qty_raw)
+        except Exception:
+            qty = 0
+
+        if qty > 0:
+            return "LONG"
+        if qty < 0:
+            return "SHORT"
+
+        side_raw = str(p.get("side", "")).upper()
+        if side_raw in {"LONG", "BUY"}:
+            return "LONG"
+        if side_raw in {"SHORT", "SELL"}:
+            return "SHORT"
+
+        return "FLAT"
+
+    return "FLAT"
+
+
 def preview_order(symbol: str, side: str, quantity: int):
     uri = "/openapi/trade/order/preview"
     url = f"{WEBULL_API_URL}{uri}"
 
     mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
 
-    # NOTE:
-    # This is the current raw HTTP preview payload under test.
-    # Auth/token/account are working. If Webull rejects the payload,
-    # the next step is SDK-based order_v3 integration.
     body_params = {
         "account_id": WEBULL_ACCOUNT_ID,
         "new_orders": [
@@ -259,7 +332,10 @@ async def webhook(request: Request):
 
     ticker = data.get("ticker", "")
     action = data.get("action", "").lower()
+    sentiment = str(data.get("sentiment", "")).lower()
     quantity = int(float(data.get("quantity", 1)))
+
+    mapped_symbol = SYMBOL_MAP.get(ticker, ticker)
 
     if action == "buy":
         side = "BUY"
@@ -268,13 +344,69 @@ async def webhook(request: Request):
     else:
         return {"status": "error", "message": f"Unsupported action: {action}"}
 
+    current_position = get_position_side_for_symbol(mapped_symbol)
+
+    if current_position == "UNKNOWN":
+        return {
+            "status": "error",
+            "message": "Could not determine current position state",
+            "symbol": mapped_symbol,
+        }
+
+    if side == "BUY" and current_position == "LONG":
+        return {
+            "status": "ignored",
+            "reason": "Already in LONG position",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
+    if side == "SELL" and current_position == "SHORT":
+        return {
+            "status": "ignored",
+            "reason": "Already in SHORT position",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
+    if side == "SELL" and current_position == "FLAT" and sentiment in {"flat", "long"}:
+        return {
+            "status": "ignored",
+            "reason": "SELL ignored because account is FLAT",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
+    if side == "BUY" and current_position == "FLAT" and sentiment == "short":
+        return {
+            "status": "ignored",
+            "reason": "BUY ignored because account is FLAT",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
     preview_result = preview_order(ticker, side, quantity)
 
     return {
         "status": "received",
         "mode": MODE,
         "ticker": ticker,
+        "symbol": mapped_symbol,
         "action": action,
+        "sentiment": sentiment,
         "quantity": quantity,
+        "current_position": current_position,
         "preview_result": preview_result,
     }
