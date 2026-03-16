@@ -26,6 +26,8 @@ SYMBOL_MAP = {
     "MGCJ2026": "MGCJ6",
     "MNQH6": "MNQH6",
     "MGCJ6": "MGCJ6",
+    "MNQ1!": "MNQH6",
+    "MGC1!": "MGCJ6",
 }
 
 
