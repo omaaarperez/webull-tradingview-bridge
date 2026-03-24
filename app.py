@@ -14,24 +14,43 @@ app = FastAPI()
 # ─────────────────────────────────────────────
 # ENV
 # ─────────────────────────────────────────────
-MODE = os.getenv("MODE", "preview_only").lower()
+MODE = os.getenv("MODE", "preview_only").strip().lower()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
-WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
-WEBULL_API_URL = os.getenv("WEBULL_API_URL", "https://api.webull.com")
+WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY", "")
+WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET", "")
+WEBULL_API_URL = os.getenv("WEBULL_API_URL", "https://api.webull.com").rstrip("/")
 WEBULL_ACCESS_TOKEN = os.getenv("WEBULL_ACCESS_TOKEN", "")
 WEBULL_ACCOUNT_ID = os.getenv("WEBULL_ACCOUNT_ID", "")
 
 # ─────────────────────────────────────────────
 # SYMBOL MAP
+# Update these to whatever Webull currently shows
 # ─────────────────────────────────────────────
 SYMBOL_MAP = {
-    "MNQH2026": "MNQH6",
-    "MGCJ2026": "MGCJ6",
-    "MNQ1!": "MNQH6",
-    "MGC1!": "MGCJ6",
+    "MNQ1!": "MNQM6",
+    "MNQM2026": "MNQM6",
+    "MNQM6": "MNQM6",
+
+    # Keep these only if they match your active Webull contracts
+    "MGC1!": "MGCM6",
+    "MGCM2026": "MGCM6",
+    "MGCM6": "MGCM6",
 }
+
+# ─────────────────────────────────────────────
+# ROOT
+# ─────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "mode": MODE,
+        "has_webull_token": bool(WEBULL_ACCESS_TOKEN),
+        "has_account_id": bool(WEBULL_ACCOUNT_ID),
+        "has_app_key": bool(WEBULL_APP_KEY),
+        "has_app_secret": bool(WEBULL_APP_SECRET),
+    }
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -40,7 +59,7 @@ def utc_timestamp():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 def md5_upper(text):
-    return hashlib.md5(text.encode()).hexdigest().upper()
+    return hashlib.md5(text.encode("utf-8")).hexdigest().upper()
 
 def generate_signature(uri, query_params, body_params, headers, app_secret):
     params = (query_params or {}).copy()
@@ -84,7 +103,11 @@ def build_headers(uri, query_params=None, body_params=None, include_token=False)
     }
 
     signature, sign_string, body_json = generate_signature(
-        uri, query_params or {}, body_params or {}, headers, WEBULL_APP_SECRET
+        uri=uri,
+        query_params=query_params or {},
+        body_params=body_params or {},
+        headers=headers,
+        app_secret=WEBULL_APP_SECRET,
     )
 
     headers["x-signature"] = signature
@@ -95,83 +118,275 @@ def build_headers(uri, query_params=None, body_params=None, include_token=False)
     return headers, sign_string, body_json
 
 # ─────────────────────────────────────────────
-# POSITION
+# WEBULL TOKEN / ACCOUNT DEBUG
+# ─────────────────────────────────────────────
+@app.get("/webull/check-token")
+def check_token():
+    uri = "/openapi/auth/token/check"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    body_params = {"token": WEBULL_ACCESS_TOKEN}
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params=body_params,
+        include_token=True,
+    )
+
+    try:
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
+
+@app.get("/webull/account-list")
+def account_list():
+    uri = "/openapi/account/list"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params={},
+        include_token=True,
+    )
+
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
+
+# ─────────────────────────────────────────────
+# POSITIONS
 # ─────────────────────────────────────────────
 def get_positions():
     uri = "/openapi/assets/positions"
     url = f"{WEBULL_API_URL}{uri}"
 
-    params = {"account_id": WEBULL_ACCOUNT_ID}
+    query_params = {"account_id": WEBULL_ACCOUNT_ID}
 
-    headers, _, _ = build_headers(uri, params, {}, True)
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params=query_params,
+        body_params={},
+        include_token=True,
+    )
 
-    r = requests.get(url, headers=headers, params=params)
-    return r.json()
-
-def get_position_side(symbol):
     try:
-        data = get_positions()
-        for p in data:
-            if p.get("symbol") == symbol:
-                qty = float(p.get("position", 0))
-                if qty > 0:
-                    return "LONG"
-                if qty < 0:
-                    return "SHORT"
-        return "FLAT"
-    except:
+        r = requests.get(url, headers=headers, params=query_params, timeout=30)
+        return {
+            "url": r.url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e),
+        }
+
+@app.get("/webull/positions")
+def positions():
+    return get_positions()
+
+def get_position_side_for_symbol(symbol: str) -> str:
+    result = get_positions()
+
+    if result.get("status_code") != 200:
         return "UNKNOWN"
 
+    try:
+        data = json.loads(result.get("response", "[]"))
+    except Exception:
+        return "UNKNOWN"
+
+    if isinstance(data, dict):
+        if isinstance(data.get("positions"), list):
+            data = data["positions"]
+        elif isinstance(data.get("data"), list):
+            data = data["data"]
+        else:
+            data = []
+
+    for p in data:
+        pos_symbol = str(p.get("symbol", "")).upper()
+        if pos_symbol != symbol.upper():
+            continue
+
+        qty_raw = p.get("position", p.get("quantity", p.get("qty", 0)))
+
+        try:
+            qty = float(qty_raw)
+        except Exception:
+            qty = 0.0
+
+        if qty > 0:
+            return "LONG"
+        if qty < 0:
+            return "SHORT"
+
+        side_raw = str(p.get("side", "")).upper()
+        if side_raw in {"LONG", "BUY"}:
+            return "LONG"
+        if side_raw in {"SHORT", "SELL"}:
+            return "SHORT"
+
+        return "FLAT"
+
+    return "FLAT"
+
 # ─────────────────────────────────────────────
-# PREVIEW ORDER
+# ORDER CALLS
 # ─────────────────────────────────────────────
-def preview_order(symbol, side, quantity):
+def preview_order(symbol: str, side: str, quantity: int):
     uri = "/openapi/trade/order/preview"
     url = f"{WEBULL_API_URL}{uri}"
 
-    symbol = SYMBOL_MAP.get(symbol, symbol)
+    mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
 
-    body = {
+    body_params = {
         "account_id": WEBULL_ACCOUNT_ID,
-        "new_orders": [{
-            "combo_type": "NORMAL",
-            "client_order_id": uuid.uuid4().hex,
-            "symbol": symbol,
-            "instrument_type": "FUTURES",
-            "market": "US",
-            "order_type": "MARKET",
-            "quantity": str(quantity),
-            "side": side,
-            "time_in_force": "DAY",
-            "entrust_type": "QTY"
-        }]
+        "new_orders": [
+            {
+                "combo_type": "NORMAL",
+                "client_order_id": uuid.uuid4().hex,
+                "symbol": mapped_symbol,
+                "instrument_type": "FUTURES",
+                "market": "US",
+                "order_type": "MARKET",
+                "quantity": str(quantity),
+                "side": side.upper(),
+                "time_in_force": "DAY",
+                "entrust_type": "QTY",
+            }
+        ]
     }
 
-    headers, _, body_json = build_headers(uri, {}, body, True)
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params=body_params,
+        include_token=True,
+    )
 
-    r = requests.post(url, headers=headers, data=body_json)
+    print("PREVIEW BODY:", body_params)
 
-    print("🧪 PREVIEW RESPONSE:", r.text)
+    try:
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+        print("PREVIEW RESPONSE:", r.text)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e),
+            "debug_body_json": body_json,
+        }
 
-    return r.text
+def place_order(symbol: str, side: str, quantity: int):
+    uri = "/openapi/trade/order/place"
+    url = f"{WEBULL_API_URL}{uri}"
+
+    mapped_symbol = SYMBOL_MAP.get(symbol, symbol)
+
+    body_params = {
+        "account_id": WEBULL_ACCOUNT_ID,
+        "new_orders": [
+            {
+                "combo_type": "NORMAL",
+                "client_order_id": uuid.uuid4().hex,
+                "symbol": mapped_symbol,
+                "instrument_type": "FUTURES",
+                "market": "US",
+                "order_type": "MARKET",
+                "quantity": str(quantity),
+                "side": side.upper(),
+                "time_in_force": "DAY",
+                "entrust_type": "QTY",
+            }
+        ]
+    }
+
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params={},
+        body_params=body_params,
+        include_token=True,
+    )
+
+    print("PLACING ORDER:", body_params)
+
+    try:
+        r = requests.post(url, headers=headers, data=body_json, timeout=30)
+        print("WEBULL RESPONSE:", r.text)
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+            "debug_body_json": body_json,
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e),
+            "debug_body_json": body_json,
+        }
 
 # ─────────────────────────────────────────────
-# FUTURES SNAPSHOT (NEW)
+# DEBUG ROUTES
 # ─────────────────────────────────────────────
+@app.get("/webull/preview-mnq-buy")
+def preview_mnq_buy():
+    return preview_order("MNQ1!", "BUY", 1)
+
 @app.get("/webull/futures-snapshot")
-def futures_snapshot(symbol: str = "MNQH6"):
+def futures_snapshot(symbol: str = "MNQM6"):
     uri = "/openapi/market-data/futures/snapshot"
     url = f"{WEBULL_API_URL}{uri}"
 
-    params = {"symbols": symbol}
+    query_params = {"symbols": symbol}
 
-    headers, _, _ = build_headers(uri, params, {}, False)
+    headers, sign_string, body_json = build_headers(
+        uri=uri,
+        query_params=query_params,
+        body_params={},
+        include_token=True,
+    )
 
-    r = requests.get(url, headers=headers, params=params)
-
-    print("🔍 FUTURES SNAPSHOT:", r.text)
-
-    return r.text
+    try:
+        r = requests.get(url, headers=headers, params=query_params, timeout=30)
+        print("FUTURES SNAPSHOT RESPONSE:", r.text)
+        return {
+            "url": r.url,
+            "status_code": r.status_code,
+            "response": r.text,
+            "debug_sign_string": sign_string,
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e),
+        }
 
 # ─────────────────────────────────────────────
 # WEBHOOK
@@ -184,26 +399,112 @@ async def webhook(request: Request):
     if data.get("secret") != WEBHOOK_SECRET:
         return {"status": "unauthorized"}
 
-    ticker = data.get("ticker")
-    action = data.get("action", "").lower()
-    sentiment = data.get("sentiment", "")
-    quantity = int(float(data.get("quantity", 1)))
+    ticker = str(data.get("ticker", "")).strip()
+    action = str(data.get("action", "")).strip().lower()
+    sentiment = str(data.get("sentiment", "")).strip().lower()
 
-    symbol = SYMBOL_MAP.get(ticker, ticker)
+    try:
+        quantity = int(float(data.get("quantity", 1)))
+    except Exception:
+        return {"status": "error", "message": "Invalid quantity"}
 
-    side = "BUY" if action == "buy" else "SELL"
+    mapped_symbol = SYMBOL_MAP.get(ticker, ticker)
 
-    position = get_position_side(symbol)
+    if action == "buy":
+        side = "BUY"
+    elif action == "sell":
+        side = "SELL"
+    else:
+        return {"status": "error", "message": f"Unsupported action: {action}"}
 
-    print("MODE:", MODE)
+    print(f"MODE: {MODE}")
+    print(f"TICKER: {ticker} -> {mapped_symbol}")
+    print(f"ACTION: {action}, SIDE: {side}, SENTIMENT: {sentiment}, QTY: {quantity}")
+
+    current_position = get_position_side_for_symbol(mapped_symbol)
+
+    if current_position == "UNKNOWN":
+        return {
+            "status": "error",
+            "message": "Could not determine current position state",
+            "symbol": mapped_symbol,
+        }
+
+    if side == "BUY" and current_position == "LONG":
+        return {
+            "status": "ignored",
+            "reason": "Already in LONG position",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
+    if side == "SELL" and current_position == "SHORT":
+        return {
+            "status": "ignored",
+            "reason": "Already in SHORT position",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
+    if side == "SELL" and current_position == "FLAT" and sentiment in {"flat", "long"}:
+        return {
+            "status": "ignored",
+            "reason": "SELL ignored because account is FLAT",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
+
+    if side == "BUY" and current_position == "FLAT" and sentiment == "short":
+        return {
+            "status": "ignored",
+            "reason": "BUY ignored because account is FLAT",
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "current_position": current_position,
+        }
 
     if MODE == "preview_only":
         print("PREVIEWING ORDER...")
-        result = preview_order(symbol, side, quantity)
-        return {"mode": "preview", "result": result}
+        preview_result = preview_order(ticker, side, quantity)
+        return {
+            "status": "received",
+            "mode": MODE,
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "quantity": quantity,
+            "current_position": current_position,
+            "preview_result": preview_result,
+        }
 
-    # 🔴 LIVE DISABLED FOR NOW
+    if MODE == "live":
+        print("PLACING LIVE ORDER...")
+        place_result = place_order(ticker, side, quantity)
+        return {
+            "status": "received",
+            "mode": MODE,
+            "ticker": ticker,
+            "symbol": mapped_symbol,
+            "action": action,
+            "sentiment": sentiment,
+            "quantity": quantity,
+            "current_position": current_position,
+            "place_result": place_result,
+        }
+
     return {
-        "status": "blocked",
-        "reason": "Live trading disabled until futures payload is fixed"
+        "status": "error",
+        "message": f"Unsupported MODE: {MODE}",
     }
