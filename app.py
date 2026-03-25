@@ -1,246 +1,527 @@
-from fastapi import FastAPI, Request
 import os
+import json
 import time
 import uuid
 import hmac
-import hashlib
 import base64
-import json
-from urllib.parse import quote, urlparse
+import hashlib
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
 import requests
-
-app = FastAPI()
-
-# ─────────────────────────────────────────────
-# ENV
-# ─────────────────────────────────────────────
-MODE = os.getenv("MODE", "preview_only").lower()
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-
-WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
-WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
-WEBULL_API_URL = os.getenv("WEBULL_API_URL", "https://api.webull.com")
-WEBULL_ACCESS_TOKEN = os.getenv("WEBULL_ACCESS_TOKEN", "")
-WEBULL_ACCOUNT_ID = os.getenv("WEBULL_ACCOUNT_ID", "")
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────
-# SYMBOL MAP
+# CONFIG
 # ─────────────────────────────────────────────
-SYMBOL_MAP = {
-    "MNQ1!": "MNQM6",
-    "MNQM2026": "MNQM6",
-    "MNQM6": "MNQM6",
-}
+APP_TITLE = "TradingView -> Webull Webhook"
+MODE = os.getenv("MODE", "preview_only").strip().lower()  # preview_only | live
+
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+
+WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY", "").strip()
+WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET", "").strip()
+WEBULL_API_URL = os.getenv("WEBULL_API_URL", "https://api.webull.com").strip().rstrip("/")
+WEBULL_ACCESS_TOKEN = os.getenv("WEBULL_ACCESS_TOKEN", "").strip()
+WEBULL_ACCOUNT_ID = os.getenv("WEBULL_ACCOUNT_ID", "").strip()
+
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Set to true if you want /webhook to reject when token is missing
+REQUIRE_WEBULL_TOKEN = os.getenv("REQUIRE_WEBULL_TOKEN", "false").strip().lower() == "true"
+
+# ─────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(APP_TITLE)
+
+app = FastAPI(title=APP_TITLE)
+
+
+# ─────────────────────────────────────────────
+# MODELS
+# ─────────────────────────────────────────────
+class TradingViewAlert(BaseModel):
+    ticker: str
+    action: str
+    sentiment: str
+    quantity: str | int | float = Field(default="1")
+    price: str | int | float | None = None
+    time: Optional[str] = None
+    interval: Optional[str] = None
+
 
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
-def utc_timestamp():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def now_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def md5_upper(text):
-    return hashlib.md5(text.encode()).hexdigest().upper()
 
-def generate_signature(uri, query_params, body_params, headers, app_secret):
-    params = (query_params or {}).copy()
-    params.update({
-        "x-app-key": headers["x-app-key"],
-        "x-signature-algorithm": headers["x-signature-algorithm"],
-        "x-signature-version": headers["x-signature-version"],
-        "x-signature-nonce": headers["x-signature-nonce"],
-        "x-timestamp": headers["x-timestamp"],
-        "host": headers["host"],
-    })
+def mask_value(value: str, keep: int = 4) -> str:
+    if not value:
+        return ""
+    if len(value) <= keep:
+        return "*" * len(value)
+    return "*" * (len(value) - keep) + value[-keep:]
 
-    sorted_params = sorted(params.items())
-    param_string = "&".join([f"{k}={v}" for k, v in sorted_params])
 
-    body_json = json.dumps(body_params or {}, separators=(",", ":"))
-    body_md5 = md5_upper(body_json) if body_params else ""
+def parse_qty(v: Any) -> int:
+    try:
+        return max(1, int(float(v)))
+    except Exception:
+        return 1
 
-    sign_string = f"{uri}&{param_string}{'&' + body_md5 if body_md5 else ''}"
-    encoded = quote(sign_string, safe="")
 
-    signature = base64.b64encode(
-        hmac.new((WEBULL_APP_SECRET + "&").encode(), encoded.encode(), hashlib.sha1).digest()
-    ).decode()
+def parse_price(v: Any) -> Optional[float]:
+    if v in (None, "", "null"):
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
 
-    return signature, sign_string, body_json
 
-def build_headers(uri, query_params=None, body_params=None, include_token=False):
-    host = urlparse(WEBULL_API_URL).netloc
+def normalize_action(action: str) -> str:
+    a = (action or "").strip().lower()
+    if a in {"buy", "long"}:
+        return "buy"
+    if a in {"sell", "short"}:
+        return "sell"
+    if a in {"close", "flat", "flatten"}:
+        return "flat"
+    return a
+
+
+def normalize_sentiment(sentiment: str) -> str:
+    s = (sentiment or "").strip().lower()
+    if s in {"long", "buy"}:
+        return "long"
+    if s in {"short", "sell"}:
+        return "short"
+    if s in {"flat", "close", "flatten"}:
+        return "flat"
+    return s
+
+
+def normalize_futures_symbol(tv_ticker: str) -> str:
+    """
+    Convert TradingView-like symbols such as:
+      MNQH2026 -> MNQH6
+      MGCJ2026 -> MGCJ6
+      CME_MINI:MNQH2026 -> MNQH6
+    Leaves already-short symbols unchanged when possible.
+    """
+    raw = (tv_ticker or "").strip().upper()
+
+    # remove exchange prefix if present
+    if ":" in raw:
+        raw = raw.split(":")[-1]
+
+    # remove spaces
+    raw = raw.replace(" ", "")
+
+    # If it looks like root + month + 4-digit year, shorten year to last digit
+    # Examples:
+    # MNQH2026 -> MNQH6
+    # MESM2026 -> MESM6
+    if len(raw) >= 6 and raw[-4:].isdigit():
+        year4 = raw[-4:]
+        return raw[:-4] + year4[-1]
+
+    return raw
+
+
+def side_from_alert(action: str, sentiment: str) -> Optional[str]:
+    """
+    Output side for new order intent:
+      buy + long  -> BUY
+      sell + short -> SELL
+      flat -> None
+    """
+    a = normalize_action(action)
+    s = normalize_sentiment(sentiment)
+
+    if a == "flat" or s == "flat":
+        return None
+    if a == "buy" and s == "long":
+        return "BUY"
+    if a == "sell" and s == "short":
+        return "SELL"
+
+    # fallback based on action only
+    if a == "buy":
+        return "BUY"
+    if a == "sell":
+        return "SELL"
+    return None
+
+
+def require_secret(incoming_secret: Optional[str], body_secret: Optional[str] = None) -> None:
+    if not WEBHOOK_SECRET:
+        logger.warning("WEBHOOK_SECRET is blank; webhook is not protected.")
+        return
+
+    candidate = (incoming_secret or "").strip()
+    if not candidate and body_secret:
+        candidate = body_secret.strip()
+
+    if candidate != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+
+def build_webull_headers(
+    method: str,
+    path: str,
+    body_json: Optional[str] = None,
+    access_token: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Adjust this function if your existing signature format differs.
+    This starter keeps the signing logic isolated so it is easy to fix in one place.
+    """
+    timestamp = now_iso_z()
+    nonce = uuid.uuid4().hex
+
+    # Base signing string pattern used in prior project attempts
+    parts = [
+        f"{path}",
+        f"host=api.webull.com",
+        f"x-app-key={WEBULL_APP_KEY}",
+        f"x-signature-algorithm=HMAC-SHA1",
+        f"x-signature-nonce={nonce}",
+        f"x-signature-version=1.0",
+        f"x-timestamp={timestamp}",
+    ]
+    if body_json:
+        signing_string = "&".join(parts) + "&" + body_json
+    else:
+        signing_string = "&".join(parts)
+
+    digest = hmac.new(
+        WEBULL_APP_SECRET.encode("utf-8"),
+        signing_string.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+    signature = base64.b64encode(digest).decode("utf-8")
 
     headers = {
-        "Accept": "application/json",
         "Content-Type": "application/json",
-        "host": host,
+        "Host": "api.webull.com",
         "x-app-key": WEBULL_APP_KEY,
         "x-signature-algorithm": "HMAC-SHA1",
         "x-signature-version": "1.0",
-        "x-signature-nonce": uuid.uuid4().hex,
-        "x-timestamp": utc_timestamp(),
-        "x-version": "v2",
+        "x-signature-nonce": nonce,
+        "x-timestamp": timestamp,
+        "x-signature": signature,
     }
 
-    signature, sign_string, body_json = generate_signature(
-        uri, query_params or {}, body_params or {}, headers, WEBULL_APP_SECRET
+    if access_token:
+        headers["access_token"] = access_token
+
+    return headers
+
+
+def webull_request(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    use_access_token: bool = False,
+) -> Dict[str, Any]:
+    url = f"{WEBULL_API_URL}{path}"
+    body_json = json.dumps(payload, separators=(",", ":")) if payload is not None else None
+
+    headers = build_webull_headers(
+        method=method,
+        path=path,
+        body_json=body_json,
+        access_token=WEBULL_ACCESS_TOKEN if use_access_token else None,
     )
 
-    headers["x-signature"] = signature
+    logger.info("Webull request: %s %s", method.upper(), path)
+    if payload is not None:
+        logger.info("Webull payload: %s", body_json)
 
-    if include_token:
-        headers["x-access-token"] = WEBULL_ACCESS_TOKEN
+    resp = requests.request(
+        method=method.upper(),
+        url=url,
+        headers=headers,
+        data=body_json,
+        timeout=REQUEST_TIMEOUT,
+    )
 
-    return headers, sign_string, body_json
+    text = resp.text
+    logger.info("Webull response status: %s", resp.status_code)
+    logger.info("Webull response body: %s", text)
 
-# ─────────────────────────────────────────────
-# POSITIONS
-# ─────────────────────────────────────────────
-def get_positions():
-    uri = "/openapi/assets/positions"
-    url = f"{WEBULL_API_URL}{uri}"
-
-    params = {"account_id": WEBULL_ACCOUNT_ID}
-
-    headers, _, _ = build_headers(uri, params, {}, True)
-
-    r = requests.get(url, headers=headers, params=params)
-    return r.json()
-
-def get_position_side(symbol):
     try:
-        data = get_positions()
-        for p in data:
-            if p.get("symbol") == symbol:
-                qty = float(p.get("position", 0))
-                if qty > 0:
-                    return "LONG"
-                if qty < 0:
-                    return "SHORT"
-        return "FLAT"
-    except:
-        return "UNKNOWN"
+        data = resp.json()
+    except Exception:
+        data = {"raw_text": text}
+
+    return {
+        "url": url,
+        "status_code": resp.status_code,
+        "data": data,
+        "raw_text": text,
+    }
+
 
 # ─────────────────────────────────────────────
-# PREVIEW
+# WEBULL AUTH / ACCOUNT HELPERS
 # ─────────────────────────────────────────────
-def preview_order(symbol, side, quantity):
-    uri = "/openapi/trade/order/preview"
-    url = f"{WEBULL_API_URL}{uri}"
+def create_token() -> Dict[str, Any]:
+    return webull_request("POST", "/openapi/auth/token/create", payload={}, use_access_token=False)
 
-    symbol = SYMBOL_MAP.get(symbol, symbol)
 
-    body = {
+def check_token(token: str) -> Dict[str, Any]:
+    return webull_request(
+        "POST",
+        "/openapi/auth/token/check",
+        payload={"token": token},
+        use_access_token=False,
+    )
+
+
+def list_accounts() -> Dict[str, Any]:
+    return webull_request("GET", "/openapi/account/list", payload=None, use_access_token=True)
+
+
+def preview_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
+    return webull_request(
+        "POST",
+        "/openapi/trade/order/preview",
+        payload=order_payload,
+        use_access_token=True,
+    )
+
+
+def place_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
+    return webull_request(
+        "POST",
+        "/openapi/trade/order/place",
+        payload=order_payload,
+        use_access_token=True,
+    )
+
+
+# ─────────────────────────────────────────────
+# ORDER PAYLOAD BUILDER
+# ─────────────────────────────────────────────
+def build_futures_order_payload(alert: TradingViewAlert) -> Dict[str, Any]:
+    """
+    This is the main area you may need to tweak once we confirm
+    the exact field names your Webull account expects for futures.
+    """
+    symbol = normalize_futures_symbol(alert.ticker)
+    qty = parse_qty(alert.quantity)
+    price = parse_price(alert.price)
+    side = side_from_alert(alert.action, alert.sentiment)
+
+    if not side:
+        raise HTTPException(status_code=400, detail="Flat/close alert received; no new order side to place.")
+
+    if not WEBULL_ACCOUNT_ID:
+        raise HTTPException(status_code=500, detail="WEBULL_ACCOUNT_ID is not set.")
+
+    client_order_id = uuid.uuid4().hex[:32]
+
+    order_payload = {
         "account_id": WEBULL_ACCOUNT_ID,
-        "new_orders": [{
-            "combo_type": "NORMAL",
-            "client_order_id": uuid.uuid4().hex,
-            "symbol": symbol,
-            "instrument_type": "FUTURES",
-            "market": "US",
-            "order_type": "MARKET",
-            "quantity": str(quantity),
-            "side": side,
-            "time_in_force": "DAY",
-            "entrust_type": "QTY"
-        }]
+        "new_orders": [
+            {
+                "client_order_id": client_order_id,
+                "combo_type": "NORMAL",
+                "instrument_type": "FUTURES",
+                "symbol": symbol,
+                "side": side,
+                "order_type": "MKT",
+                "time_in_force": "DAY",
+                "quantity": qty,
+            }
+        ],
     }
 
-    headers, _, body_json = build_headers(uri, {}, body, True)
+    # Optional: if later you want to do limit from TradingView price
+    if price is not None:
+        order_payload["tv_price_hint"] = price
 
-    r = requests.post(url, headers=headers, data=body_json)
+    return order_payload
 
-    print("🧪 PREVIEW RESPONSE:", r.text)
-
-    return r.text
 
 # ─────────────────────────────────────────────
-# PLACE ORDER (LIVE)
+# ROUTES
 # ─────────────────────────────────────────────
-def place_order(symbol, side, quantity):
-    uri = "/openapi/trade/order/place"
-    url = f"{WEBULL_API_URL}{uri}"
-
-    symbol = SYMBOL_MAP.get(symbol, symbol)
-
-    body = {
-        "account_id": WEBULL_ACCOUNT_ID,
-        "new_orders": [{
-            "combo_type": "NORMAL",
-            "client_order_id": uuid.uuid4().hex,
-            "symbol": symbol,
-            "instrument_type": "FUTURES",
-            "market": "US",
-            "order_type": "MARKET",
-            "quantity": str(quantity),
-            "side": side,
-            "time_in_force": "DAY",
-            "entrust_type": "QTY"
-        }]
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "app": APP_TITLE,
+        "mode": MODE,
+        "webull_api_url": WEBULL_API_URL,
+        "has_webhook_secret": bool(WEBHOOK_SECRET),
+        "has_app_key": bool(WEBULL_APP_KEY),
+        "has_app_secret": bool(WEBULL_APP_SECRET),
+        "has_access_token": bool(WEBULL_ACCESS_TOKEN),
+        "account_id_masked": mask_value(WEBULL_ACCOUNT_ID),
     }
 
-    headers, _, body_json = build_headers(uri, {}, body, True)
 
-    print("🚀 PLACING ORDER:", body)
-
-    r = requests.post(url, headers=headers, data=body_json)
-
-    print("📩 WEBULL RESPONSE:", r.text)
-
-    return r.text
-
-# ─────────────────────────────────────────────
-# FUTURES SNAPSHOT (FIXED)
-# ─────────────────────────────────────────────
-@app.get("/webull/futures-snapshot")
-def futures_snapshot(symbol: str = "MNQM6"):
-    uri = "/openapi/market-data/futures/snapshot"
-    url = f"{WEBULL_API_URL}{uri}"
-
-    params = {
-        "symbols": symbol,
-        "category": "US_FUTURES"
+@app.get("/debug/config")
+def debug_config() -> Dict[str, Any]:
+    return {
+        "mode": MODE,
+        "webull_api_url": WEBULL_API_URL,
+        "webhook_secret_set": bool(WEBHOOK_SECRET),
+        "webull_app_key_set": bool(WEBULL_APP_KEY),
+        "webull_app_secret_set": bool(WEBULL_APP_SECRET),
+        "webull_access_token_set": bool(WEBULL_ACCESS_TOKEN),
+        "webull_account_id_masked": mask_value(WEBULL_ACCOUNT_ID),
+        "require_webull_token": REQUIRE_WEBULL_TOKEN,
     }
 
-    headers, _, _ = build_headers(uri, params, {}, True)
 
-    r = requests.get(url, headers=headers, params=params)
+@app.post("/debug/webull/create-token")
+def debug_create_token(x_webhook_secret: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_secret(x_webhook_secret)
+    return create_token()
 
-    print("🔍 SNAPSHOT:", r.text)
 
-    return r.text
+@app.post("/debug/webull/check-token")
+async def debug_check_token(
+    request: Request,
+    x_webhook_secret: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    require_secret(x_webhook_secret)
+    body = await request.json()
+    token = (body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing token")
+    return check_token(token)
 
-# ─────────────────────────────────────────────
-# WEBHOOK
-# ─────────────────────────────────────────────
+
+@app.get("/debug/webull/accounts")
+def debug_accounts(x_webhook_secret: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_secret(x_webhook_secret)
+    if not WEBULL_ACCESS_TOKEN and REQUIRE_WEBULL_TOKEN:
+        raise HTTPException(status_code=500, detail="WEBULL_ACCESS_TOKEN is missing")
+    return list_accounts()
+
+
+@app.post("/debug/webull/preview")
+async def debug_preview(
+    request: Request,
+    x_webhook_secret: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    require_secret(x_webhook_secret)
+    body = await request.json()
+    alert = TradingViewAlert(**body)
+    payload = build_futures_order_payload(alert)
+    return {
+        "normalized_symbol": normalize_futures_symbol(alert.ticker),
+        "order_payload": payload,
+        "preview_response": preview_order(payload),
+    }
+
+
 @app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    print("WEBHOOK RECEIVED:", data)
+async def webhook(
+    request: Request,
+    x_webhook_secret: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    raw_body = await request.body()
 
-    if data.get("secret") != WEBHOOK_SECRET:
-        return {"status": "unauthorized"}
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body must be valid JSON")
 
-    ticker = data.get("ticker")
-    action = data.get("action", "").lower()
-    quantity = int(float(data.get("quantity", 1)))
+    require_secret(x_webhook_secret, body.get("secret"))
 
-    symbol = SYMBOL_MAP.get(ticker, ticker)
+    logger.info("Incoming webhook body: %s", json.dumps(body, separators=(",", ":")))
 
-    side = "BUY" if action == "buy" else "SELL"
+    alert = TradingViewAlert(**body)
 
-    position = get_position_side(symbol)
+    normalized = {
+        "ticker_raw": alert.ticker,
+        "ticker_normalized": normalize_futures_symbol(alert.ticker),
+        "action": normalize_action(alert.action),
+        "sentiment": normalize_sentiment(alert.sentiment),
+        "quantity": parse_qty(alert.quantity),
+        "price": parse_price(alert.price),
+        "interval": alert.interval,
+        "time": alert.time,
+        "mode": MODE,
+    }
 
-    print("MODE:", MODE)
+    logger.info("Normalized alert: %s", json.dumps(normalized, separators=(",", ":")))
+
+    # Flat/close webhook: for now just acknowledge it.
+    # Later we will connect this to positions + close/reverse logic.
+    if normalized["sentiment"] == "flat" or normalized["action"] == "flat":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "mode": MODE,
+                "message": "Flat alert received. Close logic not wired yet.",
+                "normalized": normalized,
+            },
+        )
+
+    if not WEBULL_ACCESS_TOKEN and REQUIRE_WEBULL_TOKEN:
+        raise HTTPException(status_code=500, detail="WEBULL_ACCESS_TOKEN missing")
+
+    order_payload = build_futures_order_payload(alert)
 
     if MODE == "preview_only":
-        print("PREVIEWING ORDER...")
-        result = preview_order(symbol, side, quantity)
-        return {"mode": "preview", "result": result}
+        preview_resp = preview_order(order_payload)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "mode": MODE,
+                "normalized": normalized,
+                "order_payload": order_payload,
+                "webull_preview": preview_resp,
+            },
+        )
 
     if MODE == "live":
-        print("PLACING LIVE ORDER...")
-        result = place_order(symbol, side, quantity)
-        return {"mode": "live", "result": result}
+        place_resp = place_order(order_payload)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "mode": MODE,
+                "normalized": normalized,
+                "order_payload": order_payload,
+                "webull_place_order": place_resp,
+            },
+        )
 
-    return {"status": "error"}
+    raise HTTPException(status_code=500, detail=f"Invalid MODE: {MODE}")
+
+
+# ─────────────────────────────────────────────
+# GLOBAL ERROR HANDLER
+# ─────────────────────────────────────────────
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error: %s", str(exc))
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "error": str(exc),
+            "path": str(request.url.path),
+        },
+    )
