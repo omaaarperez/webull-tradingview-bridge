@@ -279,7 +279,7 @@ def webull_request(
 # WEBULL AUTH / ACCOUNT HELPERS
 # ─────────────────────────────────────────────
 def create_token() -> Dict[str, Any]:
-    return webull_request("POST", "/openapi/auth/token/create", payload={}, use_access_token=False)
+    return webull_request("POST", "/openapi/auth/token/create", payload=None, use_access_token=False)
 
 
 def check_token(token: str) -> Dict[str, Any]:
