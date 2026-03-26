@@ -306,7 +306,7 @@ def check_token(token: str) -> Dict[str, Any]:
 
 
 def list_accounts() -> Dict[str, Any]:
-    return webull_request("GET", "/openapi/account/list", payload=None, use_access_token=True)
+    return webull_request("GET", "/app/subscriptions/list", payload=None, use_access_token=False)
 
 
 def preview_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
