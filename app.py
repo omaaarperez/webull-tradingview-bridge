@@ -501,51 +501,20 @@ async def webhook(
 
     logger.info("Normalized alert: %s", json.dumps(normalized, separators=(",", ":")))
 
-    # Flat/close webhook: for now just acknowledge it.
-    # Later we will connect this to positions + close/reverse logic.
-    if normalized["sentiment"] == "flat" or normalized["action"] == "flat":
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "mode": MODE,
-                "message": "Flat alert received. Close logic not wired yet.",
-                "normalized": normalized,
+    side = side_from_alert(alert.action, alert.sentiment)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "message": "Webhook received successfully. No Webull order sent yet.",
+            "normalized": normalized,
+            "derived": {
+                "side": side,
+                "account_id": WEBULL_ACCOUNT_ID,
             },
-        )
-
-    if not WEBULL_ACCESS_TOKEN and REQUIRE_WEBULL_TOKEN:
-        raise HTTPException(status_code=500, detail="WEBULL_ACCESS_TOKEN missing")
-
-    order_payload = build_futures_order_payload(alert)
-
-    if MODE == "preview_only":
-        preview_resp = preview_order(order_payload)
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "mode": MODE,
-                "normalized": normalized,
-                "order_payload": order_payload,
-                "webull_preview": preview_resp,
-            },
-        )
-
-    if MODE == "live":
-        place_resp = place_order(order_payload)
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "mode": MODE,
-                "normalized": normalized,
-                "order_payload": order_payload,
-                "webull_place_order": place_resp,
-            },
-        )
-
-    raise HTTPException(status_code=500, detail=f"Invalid MODE: {MODE}")
+        },
+    )
 
 
 # ─────────────────────────────────────────────
