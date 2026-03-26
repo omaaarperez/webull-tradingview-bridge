@@ -321,9 +321,9 @@ def preview_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
 def place_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
     return webull_request(
         "POST",
-        "/openapi/trade/order/place",
+        "/trade/order/place",
         payload=order_payload,
-        use_access_token=True,
+        use_access_token=False,
     )
 
 
@@ -352,15 +352,15 @@ def build_futures_order_payload(alert: TradingViewAlert) -> Dict[str, Any]:
         "account_id": WEBULL_ACCOUNT_ID,
         "new_orders": [
             {
-                "client_order_id": client_order_id,
-                "combo_type": "NORMAL",
-                "instrument_type": "FUTURES",
-                "symbol": symbol,
-                "side": side,
-                "order_type": "MKT",
-                "time_in_force": "DAY",
-                "quantity": qty,
-            }
+    "client_order_id": client_order_id,
+    "combo_type": "NORMAL",
+    "instrument_type": "FUTURES",
+    "symbol": symbol,
+    "side": side,
+    "order_type": "MKT",
+    "time_in_force": "DAY",
+    "quantity": qty,
+}
         ],
     }
 
