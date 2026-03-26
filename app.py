@@ -502,6 +502,7 @@ async def webhook(
     logger.info("Normalized alert: %s", json.dumps(normalized, separators=(",", ":")))
 
     side = side_from_alert(alert.action, alert.sentiment)
+    is_flat = normalized["action"] == "flat" or normalized["sentiment"] == "flat"
 
     return JSONResponse(
         status_code=200,
@@ -510,6 +511,7 @@ async def webhook(
             "message": "Webhook received successfully. No Webull order sent yet.",
             "normalized": normalized,
             "derived": {
+                "signal_type": "flat" if is_flat else "entry",
                 "side": side,
                 "account_id": WEBULL_ACCOUNT_ID,
             },
