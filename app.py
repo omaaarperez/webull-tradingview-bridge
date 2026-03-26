@@ -447,7 +447,21 @@ async def debug_preview(
         "preview_response": preview_order(payload),
     }
 
-
+@app.post("/debug/webull/place")
+async def debug_place(
+    request: Request,
+    x_webhook_secret: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    require_secret(x_webhook_secret)
+    body = await request.json()
+    alert = TradingViewAlert(**body)
+    payload = build_futures_order_payload(alert)
+    return {
+        "normalized_symbol": normalize_futures_symbol(alert.ticker),
+        "order_payload": payload,
+        "place_response": place_order(payload),
+    }
+    
 @app.post("/webhook")
 async def webhook(
     request: Request,
