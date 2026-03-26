@@ -510,15 +510,24 @@ async def webhook(
             "ok": True,
             "message": "Webhook received successfully. No Webull order sent yet.",
             "normalized": normalized,
-           "derived": {
-    "signal_type": "flat" if is_flat else "entry",
-    "side": side,
-    "target_position": (
-        "flat"
-        if is_flat
-        else "long" if side == "BUY" else "short" if side == "SELL" else None
-    ),
-    "account_id": WEBULL_ACCOUNT_ID,
+          "derived": {
+            "signal_type": "flat" if is_flat else "entry",
+            "side": side,
+            "target_position": (
+                "flat"
+                if is_flat
+                else "long" if side == "BUY" else "short" if side == "SELL" else None
+            ),
+            "action_plan": (
+                "close_position"
+                if is_flat
+                else "open_long"
+                if side == "BUY"
+                else "open_short"
+                if side == "SELL"
+                else None
+            ),
+            "account_id": WEBULL_ACCOUNT_ID,
 },
         },
     )
