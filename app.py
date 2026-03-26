@@ -312,9 +312,9 @@ def list_accounts() -> Dict[str, Any]:
 def preview_order(order_payload: Dict[str, Any]) -> Dict[str, Any]:
     return webull_request(
         "POST",
-        "/openapi/trade/order/preview",
+        "/trade/order/preview",
         payload=order_payload,
-        use_access_token=True,
+        use_access_token=False,
     )
 
 
