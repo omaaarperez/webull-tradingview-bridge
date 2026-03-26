@@ -447,6 +447,13 @@ async def debug_preview(
         "preview_response": preview_order(payload),
     }
 
+@app.get("/debug/webull/positions")
+def debug_positions(x_webhook_secret: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_secret(x_webhook_secret)
+    path = f"/openapi/assets/positions?account_id={WEBULL_ACCOUNT_ID}"
+    return webull_request("GET", path, payload=None, use_access_token=False)
+
+
 @app.post("/debug/webull/place")
 async def debug_place(
     request: Request,
