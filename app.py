@@ -178,51 +178,65 @@ def require_secret(incoming_secret: Optional[str], body_secret: Optional[str] = 
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 
+from urllib.parse import quote
+
 def build_webull_headers(
     method: str,
     path: str,
     body_json: Optional[str] = None,
     access_token: Optional[str] = None,
 ) -> Dict[str, str]:
-    """
-    Adjust this function if your existing signature format differs.
-    This starter keeps the signing logic isolated so it is easy to fix in one place.
-    """
     timestamp = now_iso_z()
     nonce = uuid.uuid4().hex
 
-    # Base signing string pattern used in prior project attempts
-    parts = [
-        f"{path}",
-        f"host=api.webull.com",
-        f"x-app-key={WEBULL_APP_KEY}",
-        f"x-signature-algorithm=HMAC-SHA1",
-        f"x-signature-nonce={nonce}",
-        f"x-signature-version=1.0",
-        f"x-timestamp={timestamp}",
-    ]
-    if body_json:
-        signing_string = "&".join(parts) + "&" + body_json
-    else:
-        signing_string = "&".join(parts)
-
-    digest = hmac.new(
-        WEBULL_APP_SECRET.encode("utf-8"),
-        signing_string.encode("utf-8"),
-        hashlib.sha1,
-    ).digest()
-    signature = base64.b64encode(digest).decode("utf-8")
+    host_value = "api.webull.com"
 
     headers = {
         "Content-Type": "application/json",
-        "Host": "api.webull.com",
+        "Host": host_value,
         "x-app-key": WEBULL_APP_KEY,
         "x-signature-algorithm": "HMAC-SHA1",
         "x-signature-version": "1.0",
         "x-signature-nonce": nonce,
         "x-timestamp": timestamp,
-        "x-signature": signature,
     }
+
+    # Step 1: build sorted param string from signature headers
+    params_dict = {
+        "host": host_value,
+        "x-app-key": WEBULL_APP_KEY,
+        "x-signature-algorithm": "HMAC-SHA1",
+        "x-signature-version": "1.0",
+        "x-signature-nonce": nonce,
+        "x-timestamp": timestamp,
+    }
+
+    sorted_params = sorted(params_dict.items())
+    param_string = "&".join(f"{k}={v}" for k, v in sorted_params)
+
+    # Step 2: md5(body) only if body exists and is non-empty
+    body_md5 = ""
+    if body_json:
+        body_md5 = hashlib.md5(body_json.encode("utf-8")).hexdigest().upper()
+
+    # Step 3: build sign string
+    sign_string = f"{path}&{param_string}"
+    if body_md5:
+        sign_string += f"&{body_md5}"
+
+    # Step 4: URL-encode sign string
+    encoded_sign_string = quote(sign_string, safe="")
+
+    # Step 5: HMAC-SHA1 with app_secret + "&"
+    secret = f"{WEBULL_APP_SECRET}&"
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        encoded_sign_string.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+
+    signature = base64.b64encode(digest).decode("utf-8")
+    headers["x-signature"] = signature
 
     if access_token:
         headers["access_token"] = access_token
