@@ -451,7 +451,7 @@ async def debug_preview(
 def debug_positions(x_webhook_secret: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_secret(x_webhook_secret)
     path = f"/account/positions?accountId={WEBULL_ACCOUNT_ID}"
-    return webull_request("GET", path, payload=None, use_access_token=False)
+    return webull_request("GET", path, payload=None, use_access_token=True)
 
 
 @app.post("/debug/webull/place")
